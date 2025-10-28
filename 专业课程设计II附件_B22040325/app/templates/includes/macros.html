@@ -1,0 +1,36 @@
+{# app/templates/includes/macros.html - 最终可运行版 #}
+{% macro render_field(field, kwargs={}) %}
+
+    {# 确保 kwargs 是一个字典，如果没传，则默认为空字典 #}
+    {% set params = kwargs %}
+
+    {# 1. 决定 CSS class 并从 params 中移除，以免重复应用 #}
+    {% set css_class = params.pop('class', 'form-control') %}
+
+    {% if field.type in ['SelectField', 'QuerySelectField'] %}
+        {% set css_class = 'form-select' %}
+    {% elif field.type in ['BooleanField', 'RadioField'] %}
+        {% set css_class = 'form-check-input' %}
+    {% endif %}
+
+    <div class="mb-3">
+        {# 对于非复选框，先渲染标签 #}
+        {% if field.type not in ['BooleanField', 'RadioField'] %}
+            <label for="{{ field.id }}" class="form-label">{{ field.label.text }}</label>
+        {% endif %}
+
+        {# 渲染字段本身。注意：这里 field(**params) 依然使用 Python 的 **kwargs 解包 #}
+        {{ field(class=css_class, **params) }}
+
+        {# 对于复选框，标签在字段之后渲染 #}
+        {% if field.type in ['BooleanField'] %}
+             <label for="{{ field.id }}" class="form-check-label">{{ field.label.text }}</label>
+        {% endif %}
+
+        {% if field.errors %}
+            {% for error in field.errors %}
+                <div class="text-danger">{{ error }}</div>
+            {% endfor %}
+        {% endif %}
+    </div>
+{% endmacro %}

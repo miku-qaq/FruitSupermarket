@@ -1,0 +1,354 @@
+{% extends "base.html" %}
+{% block head_extras %}
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet"/>
+{% endblock %}
+{% block content %}
+
+    <h2 class="mb-4">销售开单</h2>
+    <div class="row">
+        <div class="col-lg-7">
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-primary text-white">
+                    选择商品
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="product-selector" class="form-label">搜索并添加商品</label>
+                        <select id="product-selector" class="form-select w-100"></select>
+                        <small class="text-muted" id="current-stock"></small>
+                    </div>
+                    <button id="add-item-btn" class="btn btn-success w-100" disabled>添加到订单</button>
+                </div>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-bordered" id="order-items-table">
+                    <thead class="table-light">
+                    <tr>
+                        <th>商品名称</th>
+                        <th>单价</th>
+                        <th style="width: 120px;">数量</th>
+                        <th>小计</th>
+                        <th>操作</th>
+                    </tr>
+                    </thead>
+                    <tbody id="order-items-body">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="col-lg-5">
+            <div class="card shadow-lg sticky-top" style="top: 10px;">
+                <div class="card-header bg-secondary text-white">
+                    订单结算
+                </div>
+                <div class="card-body">
+                    <h5 class="card-title">会员信息</h5>
+                    <div class="input-group mb-3">
+                        <input type="text" id="member-phone" class="form-control" placeholder="输入手机号查找会员">
+                        <button class="btn btn-outline-primary" type="button" id="lookup-member-btn">查找</button>
+                    </div>
+                    <div id="member-info" class="mb-3">
+                        <p class="mb-0">当前会员：<strong id="member-name">非会员</strong></p>
+                        <p class="mb-0">折扣率：<strong id="member-discount">无折扣 (100%)</strong></p>
+                        <input type="hidden" id="current-member-id" value="">
+                        <button class="btn btn-sm btn-outline-danger mt-2" id="clear-member-btn" style="display: none;">
+                            取消会员
+                        </button>
+                    </div>
+
+                    <hr>
+
+                    <dl class="row">
+                        <dt class="col-sm-6">原始总额:</dt>
+                        <dd class="col-sm-6 text-end">¥ <span id="original-amount">0.00</span></dd>
+
+                        <dt class="col-sm-6 text-danger">会员折扣:</dt>
+                        <dd class="col-sm-6 text-end text-danger">- ¥ <span id="discount-amount">0.00</span></dd>
+
+                        <hr>
+
+                        <dt class="col-sm-6 fs-4">应收金额:</dt>
+                        <dd class="col-sm-6 text-end fs-4 text-success">¥ <span id="final-amount">0.00</span></dd>
+                    </dl>
+
+                    <div class="d-grid mt-4">
+                        <button id="submit-order-btn" class="btn btn-lg btn-success" disabled>确认结算并创建订单
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+<meta name="csrf-token" content="{{ csrf_token() }}">
+{% endblock %}
+
+{% block scripts %}
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    <script>
+        // 将商品数据从 Flask 传递给 JavaScript
+        const PRODUCTS_DATA = {{ products_data | tojson }};
+        const URL_MEMBER_LOOKUP = "{{ url_for('order.member_lookup') }}";
+        const URL_SUBMIT_ORDER = "{{ url_for('order.submit_order') }}";
+        const csrfToken = $('meta[name="csrf-token"]').attr('content');
+
+        let orderItems = {}; // 存储当前订单中的商品: {product_id: {data...}}
+        let currentMember = null;
+        let selectedProduct = null;
+        let availableProducts = PRODUCTS_DATA;
+
+        $(document).ready(function () {
+            // 初始化 Select2
+            $('#product-selector').select2({
+                placeholder: '输入商品名称或ID...',
+                data: availableProducts.map(p => ({
+                    id: p.id,
+                    text: `${p.name} (${p.stock} ${p.unit}) - ¥${p.retail_price}`,
+                    product: p // 存储完整商品数据
+                })),
+                templateResult: function (data) {
+                    if (!data.product) return data.text;
+                    // 自定义展示库存
+                    return $('<span>' + data.text + '</span><small class="float-end text-muted">库存: ' + data.product.stock + '</small>');
+                }
+            }).on('select2:select', function (e) {
+                // 选中商品时更新状态
+                selectedProduct = e.params.data.product;
+                $('#add-item-btn').prop('disabled', false);
+                $('#current-stock').text(`当前库存: ${selectedProduct.stock} ${selectedProduct.unit}`);
+            }).on('select2:unselect', function (e) {
+                selectedProduct = null;
+                $('#add-item-btn').prop('disabled', true);
+                $('#current-stock').text('');
+            });
+
+            // --- 核心函数：更新订单摘要和按钮状态 ---
+            function updateOrderSummary() {
+                let originalAmount = 0;
+                let itemCount = 0;
+
+                for (const id in orderItems) {
+                    originalAmount += orderItems[id].subtotal;
+                    itemCount++;
+                }
+
+                let discountRate = currentMember ? currentMember.discount : 1.0;
+                let finalAmount = originalAmount * discountRate;
+                let discountAmount = originalAmount - finalAmount;
+
+                $('#original-amount').text(originalAmount.toFixed(2));
+                $('#discount-amount').text(discountAmount.toFixed(2));
+                $('#final-amount').text(finalAmount.toFixed(2));
+
+                // 控制结算按钮
+                $('#submit-order-btn').prop('disabled', itemCount === 0);
+            }
+
+            // --- 核心函数：渲染订单行 ---
+            function renderOrderItems() {
+                const $body = $('#order-items-body');
+                $body.empty();
+
+                for (const id in orderItems) {
+                    const item = orderItems[id];
+                    const $row = $(`
+                        <tr data-id="${id}">
+                            <td>${item.name}</td>
+                            <td>¥ ${item.price.toFixed(2)}</td>
+                            <td>
+                                <input type="number" class="form-control form-control-sm quantity-input"
+                                       value="${item.quantity}" min="1" max="${item.max_stock}" data-id="${id}">
+                            </td>
+                            <td>¥ <span class="item-subtotal">${item.subtotal.toFixed(2)}</span></td>
+                            <td><button class="btn btn-sm btn-danger remove-item-btn" data-id="${id}">移除</button></td>
+                        </tr>
+                    `);
+                    $body.append($row);
+                }
+                updateOrderSummary();
+            }
+
+            // --- 事件：添加商品到订单 ---
+            $('#add-item-btn').on('click', function () {
+                if (!selectedProduct) return;
+
+                const id = selectedProduct.id;
+                const price = selectedProduct.retail_price;
+                const maxStock = selectedProduct.stock;
+
+                if (orderItems[id]) {
+                    // 如果已存在，数量 + 1
+                    if (orderItems[id].quantity < maxStock) {
+                        orderItems[id].quantity += 1;
+                    } else {
+                        alert(`库存不足，最多只能添加 ${maxStock} ${selectedProduct.unit}。`);
+                    }
+                } else {
+                    // 新增商品
+                    orderItems[id] = {
+                        product_id: id,
+                        name: selectedProduct.name,
+                        price: price,
+                        quantity: 1,
+                        max_stock: maxStock,
+                        subtotal: price
+                    };
+                }
+
+                // 重新计算小计
+                orderItems[id].subtotal = orderItems[id].price * orderItems[id].quantity;
+
+                // 清空选中并重新渲染
+                $('#product-selector').val(null).trigger('change');
+                selectedProduct = null;
+                $('#add-item-btn').prop('disabled', true);
+                $('#current-stock').text('');
+
+                renderOrderItems();
+            });
+
+            // --- 事件：数量变化 ---
+            $('#order-items-body').on('change', '.quantity-input', function () {
+                const id = $(this).data('id');
+                let newQuantity = parseInt($(this).val());
+                const maxStock = orderItems[id].max_stock;
+
+                if (isNaN(newQuantity) || newQuantity < 1) {
+                    newQuantity = 1;
+                } else if (newQuantity > maxStock) {
+                    alert(`库存不足，最多只能添加 ${maxStock} ${orderItems[id].name}。`);
+                    newQuantity = maxStock;
+                }
+
+                $(this).val(newQuantity);
+                orderItems[id].quantity = newQuantity;
+                orderItems[id].subtotal = orderItems[id].price * newQuantity;
+                $(this).closest('tr').find('.item-subtotal').text(orderItems[id].subtotal.toFixed(2));
+
+                updateOrderSummary();
+            });
+
+            // --- 事件：移除商品 ---
+            $('#order-items-body').on('click', '.remove-item-btn', function () {
+                const id = $(this).data('id');
+                delete orderItems[id];
+                renderOrderItems();
+            });
+
+            // --- 事件：查找会员 ---
+            $('#lookup-member-btn').on('click', function () {
+                const phone = $('#member-phone').val();
+                if (!phone) {
+                    alert('请输入手机号码。');
+                    return;
+                }
+
+                $.ajax({
+                    url: URL_MEMBER_LOOKUP,
+                    type: 'GET',
+                    data: {phone: phone},
+                    success: function (response) {
+                        currentMember = {
+                            id: response.id,
+                            name: response.name,
+                            discount: response.discount
+                        };
+
+                        $('#member-name').text(response.name);
+                        $('#member-discount').text(`${(response.discount * 100).toFixed(0)}%`);
+                        $('#current-member-id').val(response.id);
+                        $('#clear-member-btn').show();
+                        flashMessage('success', `会员 ${response.name} 已应用折扣！`);
+                        updateOrderSummary(); // 重新计算总额
+                    },
+                    error: function (xhr) {
+                        currentMember = null;
+                        $('#current-member-id').val('');
+                        $('#member-name').text('非会员');
+                        $('#member-discount').text('无折扣 (100%)');
+                        $('#clear-member-btn').hide();
+                        flashMessage('warning', '未找到会员信息，按原价结算。');
+                        updateOrderSummary();
+                    }
+                });
+            });
+
+            // --- 事件：取消会员 ---
+            $('#clear-member-btn').on('click', function () {
+                currentMember = null;
+                $('#current-member-id').val('');
+                $('#member-name').text('非会员');
+                $('#member-discount').text('无折扣 (100%)');
+                $('#member-phone').val('');
+                $(this).hide();
+                flashMessage('info', '已取消会员折扣。');
+                updateOrderSummary(); // 重新计算总额
+            });
+
+            // --- 核心事件：提交订单 ---
+            $('#submit-order-btn').on('click', function () {
+                const itemsList = Object.values(orderItems).map(item => ({
+                    product_id: item.product_id,
+                    quantity: item.quantity,
+                    price: item.price,
+                    subtotal: item.subtotal
+                }));
+
+                if (itemsList.length === 0) {
+                    flashMessage('danger', '请至少添加一个商品。');
+                    return;
+                }
+
+                const orderData = {
+                    items: itemsList,
+                    member_id: $('#current-member-id').val() || null,
+                    original_amount: parseFloat($('#original-amount').text()),
+                    discount_amount: parseFloat($('#discount-amount').text()),
+                    final_amount: parseFloat($('#final-amount').text())
+                };
+                // 禁用按钮，防止重复提交
+                $(this).prop('disabled', true).text('正在处理...');
+
+                $.ajax({
+                    url: URL_SUBMIT_ORDER,
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify(orderData),
+                    headers: {
+                        'X-CSRFToken': csrfToken
+                    },
+                    success: function (response) {
+                        flashMessage('success', response.message + ` 订单号: ${response.order_id}`);
+                        // 清空状态
+                        orderItems = {};
+                        currentMember = null;
+                        $('#clear-member-btn').click();
+                        renderOrderItems();
+                        $('#submit-order-btn').prop('disabled', false).text('确认结算并创建订单');
+                    },
+                    error: function (xhr) {
+                        const errorMsg = xhr.responseJSON ? xhr.responseJSON.message : '未知错误';
+                        flashMessage('danger', '结算失败: ' + errorMsg);
+                        $('#submit-order-btn').prop('disabled', false).text('确认结算并创建订单');
+                    }
+                });
+            });
+
+            // 简单消息闪现函数（用于 AJAX 消息）
+            function flashMessage(category, message) {
+                const alertHtml = `
+                    <div class="alert alert-${category} alert-dismissible fade show" role="alert">
+                        ${message}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                `;
+                $('.container.mt-4').prepend(alertHtml);
+            }
+
+            // 页面加载时执行一次初始化
+            updateOrderSummary();
+        });
+    </script>
+{% endblock %}
